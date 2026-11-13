@@ -1,290 +1,414 @@
-# Persistent Python Key-Value Store
+# Distributed Persistent Key-Value Store
 
-**Student:** Samarth Kumar Samal  
-**Course:** CSCI 5144: Cloud Computing
+**Python · SQLite · Consistent Hashing · Docker**
 
-A persistent HTTP key-value store developed across three assignments:
-standalone storage, Docker packaging, and consistent-hash routing across
-one to three storage nodes. All application source is Python.
+A containerized HTTP storage service with durable writes, deterministic key
+partitioning, and asynchronous request handling. The system supports standalone
+operation and a sharded cluster of up to three storage nodes behind a routing
+service. Its design combines SQLite persistence with bounded caching and
+connection reuse, supported by correctness tests and recorded performance studies.
+
+**Author:** [Samarth Kumar Samal](https://github.com/samarthkumarsamal)  
+**License:** [MIT](LICENSE)
+
+## Project Overview
+
+The project addresses three core concerns in cloud storage systems:
+
+- **Persistence:** committed values survive server and container recreation.
+- **Partitioning:** consistent hashing maps each key to a stable storage owner.
+- **Concurrency and efficiency:** asynchronous HTTP, persistent connections,
+  encoded-response caching, and grouped commits reduce request overhead.
+
+The default deployment runs one router process and three independent SQLite
+storage nodes. Membership is explicitly configured; changes use a planned
+maintenance procedure.
+
+## System Architecture
+
+```mermaid
+flowchart LR
+    C[HTTP Clients] --> R[HTTP Router]
+    R --> N1[Storage Node 1]
+    R --> N2[Storage Node 2]
+    R --> N3[Storage Node 3]
+    N1 --> D1[(SQLite / Volume 1)]
+    N2 --> D2[(SQLite / Volume 2)]
+    N3 --> D3[(SQLite / Volume 3)]
+```
+
+The router hashes each key with SHA-256 and locates its owner on a ring with
+150 virtual nodes per storage node. Requests are forwarded over bounded pools
+of persistent HTTP/1.1 connections. Each key has one authoritative owner, and
+each node maintains its own database and named Docker volume.
+
+### Storage and Concurrency Model
+
+SQLite uses write-ahead logging and `synchronous=FULL`. A dedicated writer
+serializes mutations and groups up to 64 already-queued operations into a
+transaction without adding a batching timer. Successful changed writes are
+acknowledged after commit, and cached values are published after commit.
+
+A bounded LRU cache stores immutable, encoded GET responses. The default
+payload/key budget is 64 MiB, with a maximum of 65,536 entries; Python object
+overhead is additional. Strict coherence checks SQLite `data_version` to
+detect commits made by other connections.
+
+An identical cached value that is already committed can satisfy a repeated
+write without another database write. Consequently, fresh inserts, changed
+values, and identical repeated writes are measured separately.
+
+## Technology Stack
+
+| Component | Technology |
+| --- | --- |
+| Application | Python |
+| Asynchronous HTTP | Uvicorn and httptools |
+| Event loop | uvloop on supported Linux deployments; asyncio on Windows |
+| Persistent storage | SQLite with WAL and FULL synchronization |
+| Partitioning | SHA-256 consistent hashing with virtual nodes |
+| Deployment | Docker and Docker Compose |
+| Analysis | CSV measurements and Matplotlib figures |
 
 ## Requirements
 
-- Docker Desktop with Linux containers and Docker Compose v2+.
-- Python 3.11+ for the fast engine; local Windows testing used Python 3.11.6.
-  Containers use `python:3.12-alpine`.
-- `requirements-fast.txt` pins the fast engine's packages. Docker installs
-  them automatically. Windows skips uvloop and uses asyncio.
-- The standard-library fallback supports Python 3.10+ with `--engine threaded`.
-- Matplotlib is needed only for generating graphs.
+- Docker Engine or Docker Desktop with Linux containers and Compose v2+.
+- Python 3.11+ for the asynchronous engine; the tested Windows version was 3.11.6.
+- Containers use `python:3.12-alpine` and install pinned dependencies from
+  `requirements-fast.txt`.
+- The standard-library threaded engine supports Python 3.10+.
+- Matplotlib is required only to regenerate performance graphs.
 
-## Files to keep
+## Deployment
 
-| Purpose | Files |
-| --- | --- |
-| Required application | `server.py`, `storage.py`, `router.py`, `consistent_hash.py`, `fast_runtime.py`, `fast_http.py`, `access_logging.py`, **`runtime_logging.py`**, `requirements-fast.txt` |
-| Docker deployment | `Dockerfile`, `Dockerfile.router`, `compose.yaml`, `.dockerignore`, `.gitignore` |
-| Correctness checks | `test_api.py`, `test_consistent_hash.py`, `check_distribution.py` |
-| Node-count benchmarks | `kv_bench.py`, `run_trials.py`, `plot_results.py`, `compose.bench.yaml`, `compose.two.yaml`, `compose.three.yaml` |
-| Planned migration | `export_cluster.py`, `migrate_cluster.py` |
-| Documentation/evidence | This README, the three assignment reports, benchmark CSVs, `benchmark_comparison.md`, and PNG graphs in `reports/` |
-| Optional experiments | `bench_write_workloads.py`, `compose.workers.yaml`, SVG graph copies |
+Choose one deployment mode at a time; each uses host port 8080 by default.
 
-Both Dockerfiles copy `runtime_logging.py`; it must be committed even when
-using the async engine. Keep virtual environments, caches, local databases/WAL
-files, `.env` files, logs, migration snapshots and `optimization.patch` outside
-the submission. Retain backups privately. Exclude `.git/` from a source ZIP;
-it remains normal repository metadata. No Go files are required.
+### Three-Node Cluster
 
-## Quick start: three storage nodes
+```bash
+git clone https://github.com/samarthkumarsamal/kv-store-cc.git
+cd kv-store-cc
+```
 
-Run from the repository root. Stop other applications publishing ports
-8080-8083. If a benchmark cluster is active, stop it first:
+Keep host ports 8080-8083 available. If the separate benchmark deployment is
+active, stop it before starting the main cluster:
 
 ```bash
 docker compose -f compose.bench.yaml --profile two --profile three stop
+```
+
+Build and start the main cluster:
+
+```bash
 docker compose build node1 router
 docker compose -f compose.yaml up -d --wait --wait-timeout 120
 docker compose -f compose.yaml ps
 ```
 
-Use `compose.yaml` alone for the selected configuration: one router worker,
-three SQLite nodes and a named data volume for each node.
+| Service | Host Endpoint | Purpose |
+| --- | --- | --- |
+| Router | http://127.0.0.1:8080 | Client API |
+| node1 | http://127.0.0.1:8081 | Direct inspection and placement verification |
+| node2 | http://127.0.0.1:8082 | Direct inspection and placement verification |
+| node3 | http://127.0.0.1:8083 | Direct inspection and placement verification |
 
-| Component | Host URL |
-| --- | --- |
-| Router: normal client requests | http://127.0.0.1:8080 |
-| node1: placement checks | http://127.0.0.1:8081 |
-| node2: placement checks | http://127.0.0.1:8082 |
-| node3: placement checks | http://127.0.0.1:8083 |
+Use `compose.yaml` alone for the default one-worker router configuration.
 
-```bash
-python test_consistent_hash.py
-python test_api.py
-python kv_bench.py
-python check_distribution.py
-```
+### Standalone Python Service
 
-The placement checker verifies the default 300 benchmark keys. Run SET first;
-the checker expects fixed three-node ownership without stale copies from a
-different membership in those volumes.
-
-```bash
-docker compose -f compose.yaml logs --tail 50
-docker compose -f compose.yaml stop
-```
-
-Named volumes preserve data across container recreation. Keep the same
-project/volume names. `docker compose down -v` removes the data volumes.
-
-## Standalone Python and Docker modes
-
-For a local server, activate a virtual environment and run:
+Activate a virtual environment, install the runtime dependencies, and start
+the server on an available port:
 
 ```bash
 python -m pip install -r requirements-fast.txt
-python storage.py
 python server.py --engine async --database data/kv.db
 ```
 
-The default address is `http://127.0.0.1:8080`. Run `python test_api.py` in
-another terminal. Use `--engine threaded` for the standard-library fallback.
-For persistence, run `python kv_bench.py set`, restart with the same database
-path, then run `python kv_bench.py get` without SET.
+The default address is `http://127.0.0.1:8080`. The alternative
+`--engine threaded` selects the standard-library implementation.
 
-For the single-container assignment, stop other services on port 8080:
+### Standalone Container
 
 ```bash
 docker build -t kv-store:1.0 .
 docker run -d --name kv-store --init -p 127.0.0.1:8080:8080 -v kv-data:/data kv-store:1.0
 ```
 
-The database is `/data/kv.db` in the named volume. See
-[Assignment 2](reports/assignment2.md) for the replacement/persistence test.
+The container runs as an unprivileged user. Its database is `/data/kv.db`,
+stored in the `kv-data` named volume. The image includes an HTTP health check.
+Application modules are copied into the image, and pinned dependencies are
+installed during the build. `EXPOSE 8080` declares the service port;
+`ENTRYPOINT ["python", "server.py"]` starts the server, with default arguments
+binding to `0.0.0.0:8080` inside the container.
 
-## API and implementation
+## HTTP API
 
-| Method | Path | Body | Success |
+| Method | Resource | Request | Successful Response |
 | --- | --- | --- | --- |
-| POST or PUT | `/{key}` | `{"value": ...}` | 200: stored |
-| GET | `/{key}` | None | 200 with `{"value": ...}` |
-| DELETE | `/{key}` | None | 200: deleted |
+| POST or PUT | `/{key}` | JSON object containing `value` | 200 with confirmation |
+| GET | `/{key}` | No body | 200 with `{"value": ...}` |
+| DELETE | `/{key}` | No body | 200 with confirmation |
 
-DELETE implements DEL. Values may be standard finite JSON values, including
-null. Write bodies require JSON content type and valid Content-Length, and
-are limited to 1 MiB. Keys must be non-empty and at most 1,024 UTF-8 bytes;
-percent-encode reserved characters. Invalid requests return 400, missing keys
-404, and storage errors 500. Router failures return 502; pool exhaustion 503.
-The async engine returns 405 for unsupported methods. `/` returns 400.
+POST and PUT create or replace a value. Values may be JSON strings, finite
+numbers, arrays, objects, booleans, or null. Write requests require
+`Content-Type: application/json` and valid Content-Length framing.
 
-- Uvicorn/httptools and Linux uvloop handle asynchronous HTTP. Client and
-  upstream connections persist; upstream pools are bounded.
-- SHA-256 and 150 virtual nodes per storage node determine consistent-hash
-  ownership. Membership changes require planned data movement.
-- SQLite WAL and `synchronous=FULL` remain enabled. A dedicated writer groups
-  up to 64 already-queued mutations without adding a batching timer and
-  acknowledges successful mutations after commit.
-- A bounded LRU cache stores encoded GET responses. Its default payload/key
-  budget is 64 MiB with at most 65,536 entries; object overhead is additional.
-  Strict coherence detects external SQLite commits through `data_version`.
-- An identical cached, committed value may satisfy a repeated PUT without
-  another disk write. Measure this separately from inserts/changed values.
-- Timestamped operation logging stays enabled. Bounded background queues
-  flush on normal shutdown; abrupt termination can lose buffered log records.
-  Values are excluded from operation logs. Explicit memory mode is volatile.
+- Maximum request body: **1 MiB**.
+- Maximum key length: **1,024 UTF-8 bytes**.
+- Keys must be non-empty; reserved URL characters must be percent-encoded.
+- The root path `/` has no key and returns 400.
 
-## Measurements and reproduction
+### Example Requests
+
+These examples use Windows Command Prompt quoting:
+
+```bat
+curl -i -X PUT http://127.0.0.1:8080/project_demo -H "Content-Type: application/json" --data "{\"value\":\"Cloud Computing\"}"
+curl -i http://127.0.0.1:8080/project_demo
+curl -i -X DELETE http://127.0.0.1:8080/project_demo
+```
+
+The GET response contains:
+
+```json
+{"value": "Cloud Computing"}
+```
+
+| Status | Meaning |
+| --- | --- |
+| 400 | Invalid key, JSON, or request framing |
+| 404 | Key not found |
+| 405 | Unsupported method in the asynchronous engine |
+| 500 | Storage operation failed |
+| 502 | Selected upstream node could not complete the request |
+| 503 | Selected node's connection pool is busy |
+
+## Runtime Configuration
+
+| Option | Component | Default | Purpose |
+| --- | --- | --- | --- |
+| `--engine` | Server and router | `auto` | Select `async`, `threaded`, or automatic detection |
+| `--storage` | Server | `sqlite` | Persistent SQLite or explicitly volatile memory storage |
+| `--cache-mib` | Server | `64` | Encoded-response cache payload/key budget |
+| `--cache-coherence` | Server | `strict` | Detect external database commits |
+| `--batch-size` | Server | `64` | Maximum queued mutations grouped per transaction |
+| `--access-log` | Server and router | `on` | Timestamped operation logging |
+| `--virtual-nodes` | Router | `150` | Ring positions per storage node |
+| `--workers` | Router | `1` | Asynchronous router process count |
+
+The optional two-worker experiment uses:
+
+```bash
+docker compose -f compose.yaml -f compose.workers.yaml up -d --wait
+```
+
+One worker remains the selected default based on the recorded local tests.
+Storage nodes remain single-process.
+
+## Validation
+
+Run storage and hash-ring checks independently:
+
+```bash
+python storage.py
+python test_consistent_hash.py
+```
+
+With the three-node cluster running:
+
+```bash
+python test_api.py
+python kv_bench.py
+python check_distribution.py
+```
+
+The API suite contains seven tests covering CRUD, missing keys, JSON values,
+invalid input, independent concurrent requests, same-key writes, and concurrent
+writes/deletes. Nine hash-ring tests cover determinism, membership changes,
+invalid configuration, and Unicode keys.
+
+The placement checker verifies the default 300 benchmark keys and their
+values on the expected owners. The recorded distribution was 78, 115, and
+107 keys, with 300/300 correct values and zero placement problems. It expects
+fixed three-node membership without stale copies from previous memberships.
+
+## Performance Evaluation
+
+Measurements were collected locally using Docker Desktop/WSL2. Client location,
+concurrency, key count, runtime version, and write history are identified below.
+SQLite FULL durability and operation logging remained enabled.
+
+### Node-Count Study: Intermediate Threaded Runtime
+
+Each configuration used three client threads and 300 keys per phase, with one
+warm-up and five measured trials. Values below are medians across those trials.
+SET reused the warm-up key/value dataset; these measurements describe repeated
+workloads rather than fresh-insert capacity.
+
+| Storage Nodes | SET ops/s | GET ops/s | SET Average ms | GET Average ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1,084.3 | 1,208.0 | 2.75 | 2.46 |
+| 2 | 976.0 | 1,226.7 | 3.06 | 2.43 |
+| 3 | 1,118.5 | 1,281.3 | 2.66 | 2.33 |
+
+![Intermediate threaded runtime: throughput across one to three storage nodes](reports/throughput.png)
+
+![Intermediate threaded runtime: average and per-trial p99 latency](reports/latency.png)
+
+These results show modest, non-monotonic scaling. A matched one-/two-/three-node
+study for the current asynchronous engine remains open. The committed CSVs
+and figures retain their intermediate-runtime provenance.
+
+### Asynchronous Runtime: Write Workloads
+
+The following are separate single-run phases with three storage nodes, three
+client threads, and 3,000 keys. The client ran inside the router container.
+
+| Workload | Throughput ops/s | Average ms | p99 ms |
+| --- | ---: | ---: | ---: |
+| Fresh inserts | 1,035.4 | 2.89 | 9.10 |
+| Changed values | 1,459.5 | 2.05 | 4.61 |
+| Identical repeated values | 3,174.8 | 0.94 | 1.97 |
+
+All write phases and subsequent read verification phases completed without
+errors or mismatches. The workload tool removed its temporary keys afterward.
+Identical repeated writes may avoid redundant database writes, so they are
+reported separately from new or changed data.
+
+### Router Process Comparison
+
+A separate client container performed 20 GET runs per configuration, using
+16 client threads and 3,000 keys per run. Each configuration verified 60,000
+reads with zero errors or mismatches.
+
+| Router Processes | Median ops/s | Median Average ms | Median Per-Run p99 ms |
+| ---: | ---: | ---: | ---: |
+| 1 | 4,645.0 | 3.43 | 10.97 |
+| 2 | 4,525.8 | 3.52 | 12.41 |
+
+Two processes did not demonstrate an improvement in these sessions. The runs
+were collected at different times; the small throughput difference does not
+establish statistical significance. Each p99 entry is a median of per-run
+percentiles rather than a pooled percentile.
+
+### Reproducing Workloads
 
 ```bash
 python kv_bench.py --threads 3 --keys 3000
 python bench_write_workloads.py --threads 3 --keys 3000
 ```
 
-The normal benchmark retains `key_0` onward. The supplementary workload check
-uses UUID-prefixed keys, verifies fresh/changed/repeated values and removes
-its own keys. The repository client uses `http.client`; the instructor's
-example uses `requests.Session`, so their timing and percentile calculations
-can differ. These local measurements are separate from official grading.
+The first tool retains `key_0` onward. The second uses a unique UUID namespace
+to measure fresh, changed, and repeated values, verifies responses, and cleans
+up its own keys. The bundled load generator uses `http.client`; results from
+different client libraries or network paths should be identified separately.
 
-The latest three-thread GET-only persistence check read all 3,000 values after
-container recreation: 3,328.6 ops/s, 0.89 ms average, zero errors/mismatches.
-In separate-client Docker tests with 16 threads, median GET throughput was
-4,645.0 ops/s with one router worker and 4,525.8 with two. One worker remains
-selected. Detailed workloads and limitations are in [Assignment 3](reports/assignment3.md).
-
-`compose.workers.yaml` retains the optional two-worker experiment. Include it
-only for that experiment; use `compose.yaml` alone for normal operation.
-
-The existing node-count CSVs and graphs in `reports/` are **historical results
-from an earlier implementation**, with three threads, 300 keys, one warm-up
-and five measured trials. The final async version has not yet had the same
-complete one-/two-/three-node experiment on this laptop. Preserve those files
-as historical evidence rather than relabeling them as current measurements.
-
-To collect a fresh node-count batch, stop the main cluster and run each
-configuration separately:
+The commands above measure the host-to-container path. To use the internal
+router-container path recorded in the write-workload table:
 
 ```bash
+docker compose cp kv_bench.py router:/tmp/kv_bench.py
+docker compose cp bench_write_workloads.py router:/tmp/bench_write_workloads.py
+docker compose exec -T router python /tmp/bench_write_workloads.py --threads 3 --keys 3000
+```
+
+Copy the scripts again after recreating the router container.
+
+For node-count experiments, the `kv-benchmark` project provides these configurations:
+
+| Nodes | Start Command | Measurement Command |
+| ---: | --- | --- |
+| 1 | `docker compose -f compose.bench.yaml up -d --wait` | `python run_trials.py --nodes 1` |
+| 2 | `docker compose -f compose.bench.yaml -f compose.two.yaml --profile two up -d --wait` | `python run_trials.py --nodes 2` |
+| 3 | `docker compose -f compose.bench.yaml -f compose.three.yaml --profile three up -d --wait` | `python run_trials.py --nodes 3` |
+
+Stop the main cluster and the previous benchmark configuration before switching.
+The runner checks membership and refuses to overwrite existing result CSVs.
+Archive earlier result batches before collecting new ones. Benchmark membership
+switches write all test keys before reading and are separate from live-data migration.
+
+Generate tables and figures from a complete measurement batch with:
+
+```bash
+python -m pip install matplotlib
+python plot_results.py
+```
+
+## Operations and Persistence
+
+```bash
+docker compose -f compose.yaml ps
+docker compose -f compose.yaml logs --tail 50
+```
+
+To verify persistence, populate the benchmark keys, stop the cluster, recreate
+it with the same project and named volumes, then run GET without another SET:
+
+```bash
+python kv_bench.py set --keys 3000
 docker compose -f compose.yaml stop
-docker compose -f compose.bench.yaml up -d --wait
-python run_trials.py --nodes 1
-docker compose -f compose.bench.yaml stop
-
-docker compose -f compose.bench.yaml -f compose.two.yaml --profile two up -d --wait
-python run_trials.py --nodes 2
-docker compose -f compose.bench.yaml -f compose.two.yaml --profile two stop
-
-docker compose -f compose.bench.yaml -f compose.three.yaml --profile three up -d --wait
-python run_trials.py --nodes 3
-docker compose -f compose.bench.yaml -f compose.three.yaml --profile three stop
+docker compose -f compose.yaml up -d --force-recreate --wait --wait-timeout 120
+python kv_bench.py get --keys 3000
 ```
 
-The runner checks membership and refuses to overwrite existing CSVs. Archive
-the historical CSVs before collecting a new batch at those paths, and update
-report labels accordingly. Benchmark membership switches write all benchmark
-keys before reading; they are not live-data migration. Generate graphs with
-`python -m pip install matplotlib`, followed by `python plot_results.py`.
+A recorded GET-only check verified all 3,000 values after recreation, with
+zero errors or mismatches. Named volumes retain data across containers;
+`docker compose down -v` removes those volumes.
 
-## Migration and limits
+Operation logs record timestamps, methods, paths, selected nodes at the router,
+and response status codes. Stored values are excluded. Bounded queues apply
+backpressure and flush during normal shutdown; abrupt termination can lose
+queued log records. Health probes check HTTP responsiveness rather than
+complete database integrity.
 
-The included export/import helpers target `kv-benchmark`. Pause its router and
-all other writers, export a fresh snapshot of authoritative owners, start the
-destination nodes, import, configure the target membership, and verify with
-GET before new writes. The importer upserts and retains old rows; reused
-destinations can retain stale/deleted values. The demonstrated controlled
-migration does not establish complete state reconciliation or online scaling.
+## Membership Management
 
-There is no replication, automatic storage-node failover, online migration,
-authentication or TLS. Migration requires downtime and is not atomic across
-nodes. Old copies are not replicas; the router is a single point of failure.
-Local results do not guarantee a leaderboard rank or server speedup.
+Changing the hash ring changes ownership without relocating stored records.
+The export/import utilities support a planned maintenance workflow for the
+separate `kv-benchmark` project:
 
-## Assignment requirements and submission evidence
+1. Pause its router and all other writers.
+2. Export a fresh snapshot from the current authoritative owners.
+3. Start destination nodes and import the snapshot into their new partitions.
+4. Verify copied values and configure the target membership.
+5. Resume the router and perform GET-only verification before new writes.
 
-### Assignment 1: single-server key-value store
+Migration requires downtime and commits independently on each node. The current
+importer upserts records and retains existing destination rows. Reused volumes
+can therefore retain stale or previously deleted values; complete destination
+reconciliation remains an open improvement. Old copies are not replicas.
 
-| Requirement | Implementation and evidence |
+## Code Organization
+
+| Files | Responsibility |
 | --- | --- |
-| Standalone server and GET/PUT/DEL | `server.py` listens on a configurable port. GET retrieves values, PUT/POST stores values, and HTTP DELETE implements DEL. |
-| Concurrent requests and conflicting mutations | The async or threaded engine handles concurrent clients. The SQLite writer orders mutations; `test_api.py` includes same-key writes and concurrent PUT/DELETE tests. |
-| Persistence | SQLite WAL and `synchronous=FULL`; successful mutations are acknowledged after commit. `python storage.py` checks CRUD and persistence after reopening a temporary database. |
-| Error handling | Invalid requests return 400, missing keys return 404, and storage failures return 500. |
-| Timestamped operation logging | `access_logging.py` supports the async engine and `runtime_logging.py` supports the threaded engine. Logs record methods, paths and status codes without stored values. |
-| Brief report | [Assignment 1 report](reports/assignment1.md) covers design, challenges, assumptions and future improvements. Keep the final rendered report to one page. |
+| `server.py`, `storage.py` | Storage API, persistence, caching and commit coordination |
+| `router.py`, `consistent_hash.py` | Request routing and deterministic ownership |
+| `fast_runtime.py`, `fast_http.py` | Asynchronous runtime and upstream transport |
+| `access_logging.py`, `runtime_logging.py` | Background operation logging |
+| `test_api.py`, `test_consistent_hash.py`, `check_distribution.py` | Correctness and placement verification |
+| `kv_bench.py`, `bench_write_workloads.py`, `run_trials.py`, `plot_results.py` | Workload execution and performance analysis |
+| `export_cluster.py`, `migrate_cluster.py` | Planned membership migration |
+| Dockerfiles and Compose configurations | Packaging, networking and persistent volumes |
+| `reports/` | Technical reports, raw measurements, summaries and figures |
 
-With the server or router running on port 8080, a short demonstration can use
-these commands from Windows Command Prompt:
+## Technical Reports
 
-```bat
-curl -i -X PUT http://127.0.0.1:8080/submission_demo -H "Content-Type: application/json" --data "{\"value\":\"Cloud Computing\"}"
-curl -i http://127.0.0.1:8080/submission_demo
-curl -i -X DELETE http://127.0.0.1:8080/submission_demo
-curl -i http://127.0.0.1:8080/submission_demo
-```
+- [Storage architecture, concurrency and error handling](reports/assignment1.md)
+- [Container deployment and persistence validation](reports/assignment2.md)
+- [Consistent hashing, migration and performance evaluation](reports/assignment3.md)
+- [Node-count benchmark summary](reports/benchmark_comparison.md)
 
-The first three requests should return 200; the final GET should return 404.
-For the containerized cluster, `docker compose logs --tail 20 router` shows
-timestamped operation logs. The persistence procedure above verifies existing
-values after restart without writing them again.
+## Current Limits and Development Priorities
 
-### Assignment 2: Docker packaging
+The system uses explicitly configured membership and one authoritative owner per
+key. Replication, automatic storage-node failover, online migration, authentication,
+and TLS are not implemented. The router is a single point of failure.
 
-| Requirement | Implementation |
-| --- | --- |
-| Lightweight Python base image | `FROM python:3.12-alpine` in `Dockerfile`. |
-| Application source in image | Explicit COPY instructions include the server, storage, runtime, hashing and logging modules. |
-| Dependencies installed | `requirements-fast.txt` is copied and installed with pip during the image build. |
-| Port exposure | `EXPOSE 8080`; the documented `-p 127.0.0.1:8080:8080` command publishes the port. |
-| Automatic startup | `ENTRYPOINT ["python", "server.py"]`; CMD supplies the bind address, port and persistent database path. |
+Development priorities are complete-state migration with recoverable backups,
+replication and recovery, security controls, and a repeated node-count study of
+the current asynchronous runtime under matched workload conditions.
 
-The image also uses an unprivileged user, a health check and a named data
-volume. Build, run and persistence evidence are documented in the
-[Assignment 2 report](reports/assignment2.md).
+## License
 
-### Assignment 3: consistent hashing and scalability
-
-| Requirement | Evidence and current scope |
-| --- | --- |
-| Distribute across one to three stores | SHA-256 consistent hashing with 150 virtual nodes per store; Compose configurations are supplied for all three node counts. |
-| Verify routing and distribution | Nine hash-ring tests and the 300-key placement checker; the recorded placement was 78/115/107 keys with all values correct. |
-| Measure throughput and latency | The intermediate implementation has one warm-up and five measured trials per node count, with three threads and 300 keys per phase. Raw CSVs, summaries and graphs are committed. |
-| Final-version scaling evaluation | The final async runtime has three-node measurements, but a matched final-version one-/two-/three-node batch remains to be collected. |
-| Operate after membership changes | Planned maintenance migration was demonstrated. It requires paused traffic; online membership changes and automatic failover are not implemented. The importer retains old destination rows, so arbitrary reuse of old volumes needs complete state reconciliation. |
-| Comprehensive report | [Assignment 3 report](reports/assignment3.md) records implementation, challenges, measurements and limitations. |
-
-The committed node-count figures describe the intermediate threaded
-optimization stage, before the final async runtime:
-
-| Stores | Median SET ops/s | Median GET ops/s | SET average ms | GET average ms |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 1,084.3 | 1,208.0 | 2.75 | 2.46 |
-| 2 | 976.0 | 1,226.7 | 3.06 | 2.43 |
-| 3 | 1,118.5 | 1,281.3 | 2.66 | 2.33 |
-
-![Intermediate-version throughput across one to three stores](reports/throughput.png)
-
-![Intermediate-version average and p99 latency](reports/latency.png)
-
-These observations show modest, non-monotonic scaling. Fresh final-version
-measurements should use the same client location, concurrency, key count,
-value sizes, durability, logging and write/cache history across all node counts.
-Preserve earlier measurements and label each batch by implementation version.
-Consistent hashing provides partitioning; replication and automatic recovery
-from storage-node failures are separate features and are not implemented here.
-
-### Submission
-
-- Repository: https://github.com/samarthkumarsamal/kv-store-cc
-- Reports: `reports/assignment1.md`, `reports/assignment2.md`, and `reports/assignment3.md`.
-- Evidence: raw benchmark CSVs, summary CSV, comparison Markdown and graphs in `reports/`.
-- Instructor GitHub username specified in the assignment: `chalianwar`.
-
-The repository contains the local benchmark adaptation. Use the instructor's
-provided client unchanged when collecting results intended for that client;
-local-client measurements should remain clearly identified.
-
-## Reports
-
-- [Assignment 1: single-server design](reports/assignment1.md)
-- [Assignment 2: Docker packaging](reports/assignment2.md)
-- [Assignment 3: hashing, scaling and optimization](reports/assignment3.md)
-- [Historical benchmark comparison](reports/benchmark_comparison.md)
+Distributed under the [MIT License](LICENSE).
