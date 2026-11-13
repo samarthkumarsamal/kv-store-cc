@@ -198,6 +198,90 @@ authentication or TLS. Migration requires downtime and is not atomic across
 nodes. Old copies are not replicas; the router is a single point of failure.
 Local results do not guarantee a leaderboard rank or server speedup.
 
+## Assignment requirements and submission evidence
+
+### Assignment 1: single-server key-value store
+
+| Requirement | Implementation and evidence |
+| --- | --- |
+| Standalone server and GET/PUT/DEL | `server.py` listens on a configurable port. GET retrieves values, PUT/POST stores values, and HTTP DELETE implements DEL. |
+| Concurrent requests and conflicting mutations | The async or threaded engine handles concurrent clients. The SQLite writer orders mutations; `test_api.py` includes same-key writes and concurrent PUT/DELETE tests. |
+| Persistence | SQLite WAL and `synchronous=FULL`; successful mutations are acknowledged after commit. `python storage.py` checks CRUD and persistence after reopening a temporary database. |
+| Error handling | Invalid requests return 400, missing keys return 404, and storage failures return 500. |
+| Timestamped operation logging | `access_logging.py` supports the async engine and `runtime_logging.py` supports the threaded engine. Logs record methods, paths and status codes without stored values. |
+| Brief report | [Assignment 1 report](reports/assignment1.md) covers design, challenges, assumptions and future improvements. Keep the final rendered report to one page. |
+
+With the server or router running on port 8080, a short demonstration can use
+these commands from Windows Command Prompt:
+
+```bat
+curl -i -X PUT http://127.0.0.1:8080/submission_demo -H "Content-Type: application/json" --data "{\"value\":\"Cloud Computing\"}"
+curl -i http://127.0.0.1:8080/submission_demo
+curl -i -X DELETE http://127.0.0.1:8080/submission_demo
+curl -i http://127.0.0.1:8080/submission_demo
+```
+
+The first three requests should return 200; the final GET should return 404.
+For the containerized cluster, `docker compose logs --tail 20 router` shows
+timestamped operation logs. The persistence procedure above verifies existing
+values after restart without writing them again.
+
+### Assignment 2: Docker packaging
+
+| Requirement | Implementation |
+| --- | --- |
+| Lightweight Python base image | `FROM python:3.12-alpine` in `Dockerfile`. |
+| Application source in image | Explicit COPY instructions include the server, storage, runtime, hashing and logging modules. |
+| Dependencies installed | `requirements-fast.txt` is copied and installed with pip during the image build. |
+| Port exposure | `EXPOSE 8080`; the documented `-p 127.0.0.1:8080:8080` command publishes the port. |
+| Automatic startup | `ENTRYPOINT ["python", "server.py"]`; CMD supplies the bind address, port and persistent database path. |
+
+The image also uses an unprivileged user, a health check and a named data
+volume. Build, run and persistence evidence are documented in the
+[Assignment 2 report](reports/assignment2.md).
+
+### Assignment 3: consistent hashing and scalability
+
+| Requirement | Evidence and current scope |
+| --- | --- |
+| Distribute across one to three stores | SHA-256 consistent hashing with 150 virtual nodes per store; Compose configurations are supplied for all three node counts. |
+| Verify routing and distribution | Nine hash-ring tests and the 300-key placement checker; the recorded placement was 78/115/107 keys with all values correct. |
+| Measure throughput and latency | The intermediate implementation has one warm-up and five measured trials per node count, with three threads and 300 keys per phase. Raw CSVs, summaries and graphs are committed. |
+| Final-version scaling evaluation | The final async runtime has three-node measurements, but a matched final-version one-/two-/three-node batch remains to be collected. |
+| Operate after membership changes | Planned maintenance migration was demonstrated. It requires paused traffic; online membership changes and automatic failover are not implemented. The importer retains old destination rows, so arbitrary reuse of old volumes needs complete state reconciliation. |
+| Comprehensive report | [Assignment 3 report](reports/assignment3.md) records implementation, challenges, measurements and limitations. |
+
+The committed node-count figures describe the intermediate threaded
+optimization stage, before the final async runtime:
+
+| Stores | Median SET ops/s | Median GET ops/s | SET average ms | GET average ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1,084.3 | 1,208.0 | 2.75 | 2.46 |
+| 2 | 976.0 | 1,226.7 | 3.06 | 2.43 |
+| 3 | 1,118.5 | 1,281.3 | 2.66 | 2.33 |
+
+![Intermediate-version throughput across one to three stores](reports/throughput.png)
+
+![Intermediate-version average and p99 latency](reports/latency.png)
+
+These observations show modest, non-monotonic scaling. Fresh final-version
+measurements should use the same client location, concurrency, key count,
+value sizes, durability, logging and write/cache history across all node counts.
+Preserve earlier measurements and label each batch by implementation version.
+Consistent hashing provides partitioning; replication and automatic recovery
+from storage-node failures are separate features and are not implemented here.
+
+### Submission
+
+- Repository: https://github.com/samarthkumarsamal/kv-store-cc
+- Reports: `reports/assignment1.md`, `reports/assignment2.md`, and `reports/assignment3.md`.
+- Evidence: raw benchmark CSVs, summary CSV, comparison Markdown and graphs in `reports/`.
+- Instructor GitHub username specified in the assignment: `chalianwar`.
+
+The repository contains the local benchmark adaptation. Use the instructor's
+provided client unchanged when collecting results intended for that client;
+local-client measurements should remain clearly identified.
+
 ## Reports
 
 - [Assignment 1: single-server design](reports/assignment1.md)
