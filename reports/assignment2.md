@@ -1,85 +1,101 @@
 # Assignment 2: Dockerizing the Key-Value Store
 
-**Student:** Samarth Kumar Samal  
+**Author:** Samarth Kumar Samal  
 **Course:** CSCI 5144: Cloud Computing
 
-## Objective and implementation
+## 1. Objective
 
-Package the persistent Python KV server so that its runtime, dependencies,
-startup command, port, and persistent data location are reproducible.
+Package the persistent KV server with its runtime, source files, dependencies,
+port configuration and startup command so it can run consistently in a Linux
+container. Preserve database contents across container replacement.
 
-`Dockerfile` uses `python:3.12-alpine`, sets `/app` as its working directory,
-and installs the pinned packages in `requirements-fast.txt`. The current fast
-engine has external dependencies; the earlier standard-library-only description
-does not describe this image. Linux uses uvloop; the application code is Python.
+## 2. Implementation and Requirement Coverage
 
-The image explicitly copies `server.py`, `storage.py`, `runtime_logging.py`,
-`access_logging.py`, `fast_runtime.py`, `fast_http.py`, and `consistent_hash.py`.
-All must be present in the submitted repository. An unprivileged `kvuser` runs
-the application. `ENTRYPOINT` starts `python server.py`; the default command
-binds to `0.0.0.0:8080` and selects `/data/kv.db`. `EXPOSE 8080` documents the
-container port; `-p` publishes it to the host.
+| Requirement | Implementation |
+| --- | --- |
+| Appropriate lightweight base image | `FROM python:3.12-alpine` provides Python on Alpine Linux. |
+| Application files included | COPY instructions add the storage, server, runtime, hashing and logging modules under `/app`. |
+| Dependencies installed | `requirements-fast.txt` is copied and installed with pip during the build. It pins Uvicorn, httptools, uvloop and supporting packages. |
+| Service port exposed | `EXPOSE 8080` declares the container port; `-p 127.0.0.1:8080:8080` publishes it locally. |
+| Automatic startup | `ENTRYPOINT ["python", "server.py"]`; CMD supplies `--host 0.0.0.0`, `--port 8080` and `--database /data/kv.db`. |
 
-A named volume mounted at `/data` retains the SQLite database and WAL files
-across container replacement. `.dockerignore` excludes environments, Git
-metadata, databases, logs, reports and migration backups from the build context.
-The health check accepts 200 or 404 for a probe GET. It checks responsiveness,
-not full data integrity. `--init` forwards signals and reaps child processes.
+The storage image includes `server.py`, `storage.py`, `fast_runtime.py`,
+`fast_http.py`, `consistent_hash.py`, `access_logging.py` and `runtime_logging.py`.
+The latter is required by the Docker COPY instruction even when the async engine
+is selected. The current image installs external dependencies; it is not limited
+to the standard library.
 
-## Build, run and reproduce persistence
+An unprivileged `kvuser` runs the application. Environment settings disable
+bytecode generation and enable unbuffered output. `.dockerignore` excludes local
+environments, Git metadata, databases, logs, reports and migration backups.
 
-Stop other services using host port 8080. Build and start:
+A named volume mounted at `/data` retains the SQLite database and WAL files.
+SQLite WAL and FULL synchronization remain enabled. A health check accepts 200
+or 404 from a probe GET, confirming HTTP responsiveness. `--init` provides signal
+forwarding and child-process reaping.
+
+## 3. Build and Run Procedure
+
+Run from the repository root with Docker Desktop/Linux containers available.
+Use an available container name and stop other services publishing port 8080.
 
 ```bash
 docker build -t kv-store:1.0 .
 docker run -d --name kv-store --init -p 127.0.0.1:8080:8080 -v kv-data:/data kv-store:1.0
+docker ps
 ```
 
-After `docker ps` reports healthy:
+Wait for healthy status, then validate the API and populate benchmark keys:
 
 ```bash
 python test_api.py
 python kv_bench.py set
+docker logs kv-store
+```
+
+## 4. Persistence Verification Procedure
+
+Replace the container while reusing the same named volume:
+
+```bash
 docker stop kv-store
 docker rm kv-store
 docker run -d --name kv-store --init -p 127.0.0.1:8080:8080 -v kv-data:/data kv-store:1.0
+docker ps
 ```
 
-Wait for healthy status, then run `python kv_bench.py get` without SET.
-Expected: 300 correct reads, zero errors and mismatches. Use the same named
-volume. View logs with `docker logs kv-store`.
+After the replacement is healthy, verify existing values without another SET:
 
-## Recorded evidence
+```bash
+python kv_bench.py get
+```
 
-The original standalone-container experiment used Windows, Docker Desktop/WSL2,
-three threads, and 300 keys per phase:
+The default workload expects `GET: ok=300 mismatch=0 error=0`.
 
-| Historical phase | Successful | Throughput (ops/s) | Average (ms) | p99 (ms) |
-| --- | ---: | ---: | ---: | ---: |
-| SET | 300 | 31.7 | 93.88 | 239.29 |
-| GET | 300 | 653.9 | 4.57 | 19.69 |
-| GET after standalone-container replacement | 300 | 558.8 | 5.35 | 25.07 |
+## 5. Observed Validation Results
 
-Every historical phase had zero errors/mismatches. These are earlier-version
-observations, not performance measurements of the final optimized image.
+| Check | Recorded Outcome |
+| --- | --- |
+| Updated storage and router image builds from the final repository | Both builds succeeded. |
+| Updated three-node Compose deployment | All three storage nodes and the router became healthy. |
+| Updated cluster API integration | All seven tests passed. |
+| Updated cluster after volume-preserving container recreation | GET-only verification returned all 3,000 existing values, with zero errors or mismatches. |
+| Earlier standalone-container replacement | All 300 benchmark values remained correct, with zero errors or mismatches. |
 
-For the updated implementation, both images built successfully on the laptop.
-The three-node Compose deployment became healthy and passed all seven API
-tests. After recreation with its existing named volumes, a GET-only run
-verified 3,000 existing values with zero errors/mismatches: 3,328.6 ops/s,
-0.89 ms average and 2.29 ms p99. This is current clustered-container persistence
-evidence; it is not a new standalone-container benchmark. Assignment 3 records
-the optimized cluster's other measurements.
+The 3,000-key result is current clustered-container evidence; the 300-key
+standalone replacement result belongs to the earlier implementation. The
+standalone procedure above is supplied for reproduction, without presenting a
+new standalone-image performance result. Detailed throughput studies are in
+[Report 3](assignment3.md).
 
-## Challenges and limitations
+## 6. Challenges, Assumptions and Improvements
 
-An early recreation failed because `kv-store:1.0` was not available locally;
-building the expected tag resolved it. Host-port conflicts were resolved by
-stopping the competing standalone or Compose deployment. Source selection must
-include every Docker COPY input, particularly `runtime_logging.py`.
+An early launch failed because the expected image tag was unavailable locally;
+building `kv-store:1.0` resolved it. Port conflicts were resolved by stopping the
+competing deployment. Tracking every Docker COPY input, including
+`runtime_logging.py`, makes a fresh checkout buildable.
 
-Named volumes provide persistence across containers, not replication or disk
-failure protection. SQLite WAL/FULL commits and operation logging remain
-enabled. The base tag can change over time; pinning a tested digest and adding
-CI image-build tests would strengthen reproducibility. Docker Desktop and
-native Linux networking/storage can produce different benchmark results.
+Named volumes preserve data across containers but provide neither replication
+nor disk-failure protection. The health probe is a responsiveness check, not a
+full integrity test. Pinning the base image by digest and adding automated image
+build/integration checks would strengthen reproducibility.
