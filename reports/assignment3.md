@@ -1,186 +1,274 @@
-# Assignment 3: Distributed Python Key-Value Store
+# Assignment 3: Consistent-Hash Distributed Key-Value Store
 
-**Student:** Samarth Kumar Samal  
-**Course:** CSCI 5144: Cloud Computing
+**Author:** Samarth Kumar Samal  
+**Course:** CSCI 5144: Cloud Computing  
+**Evaluated application revision:** `c19354d`  
+**Repository:** https://github.com/samarthkumarsamal/kv-store-cc
 
-## Objective and architecture
+## 1. Objective and Scope
 
-Distribute the persistent KV service across one to three storage nodes using
-consistent hashing, containerize the components, and measure throughput and
-latency as the system changes.
+Extend the persistent single-server KV service to distribute requests across
+one to three storage nodes using consistent hashing. Containerize the services,
+verify routing and data correctness, and evaluate throughput and latency as the
+node count changes.
 
-Clients send GET, POST/PUT, and DELETE requests to the router on port 8080.
-The router chooses the owning node and forwards the request using a bounded
-pool of persistent upstream connections. Each node has its own Python server,
-SQLite database, and Docker named volume. The async engine uses Uvicorn,
-httptools and, on Linux, uvloop. The standard-library threaded engine remains
-available.
+The implementation supports fixed-membership operation and planned maintenance
+migration. Online reconfiguration, replication and automatic storage-node
+failover are outside the implemented scope. General migration into previously
+used destinations still requires stronger state reconciliation.
 
-The ring uses SHA-256 and 150 virtual nodes per stable node name. A key belongs
-to the first clockwise ring position at or after its hash, wrapping at the end.
-Rebuilding the same membership produces the same ownership regardless of node
-input order. Virtual nodes improve balance without guaranteeing exact equality.
+## 2. Implementation Process and Architecture
 
-SQLite uses WAL and `synchronous=FULL`. Each node's writer groups queued
-mutations without an artificial batching delay and acknowledges committed
-writes. Bounded encoded-response caching reduces GET conversion work, with
-strict SQLite `data_version` coherence. Identical committed values can satisfy
-repeated writes without another disk write. Operation logging stays enabled.
+Development proceeded through five stages:
 
-Docker Compose supplies networking, service discovery, health checks and
-persistent volumes. The main project, `kv-cluster`, contains three nodes and
-one router. The independent `kv-benchmark` project supports controlled
-one-/two-/three-node experiments. Both publish port 8080, so only one should
-publish that port at a time.
+1. Implement the HTTP API, concurrent mutation handling and SQLite persistence.
+2. Package the service with Docker, health checks and persistent named volumes.
+3. Implement an immutable consistent-hash ring and an HTTP routing service.
+4. Add asynchronous HTTP, persistent upstream connections, bounded response
+   caching and grouped durable commits.
+5. Validate key placement, demonstrate controlled migration, and measure
+   one-/two-/three-node configurations.
 
-## Routing and API correctness
+Clients communicate with the router on port 8080. GET, POST/PUT and DELETE are
+forwarded to the selected storage node. Each node owns an independent SQLite
+database and Docker volume. The main `kv-cluster` project runs three nodes;
+`kv-benchmark` supplies separate one-/two-/three-node configurations and volumes.
 
-Nine consistent-hash tests passed, covering deterministic routing, node order,
-membership changes, invalid inputs and Unicode. For 10,000 demonstration keys:
+The ring uses SHA-256 and 150 virtual positions per stable node name. A key
+belongs to the first clockwise position at or after its hash, wrapping at the
+end. Sorting node identities makes routing independent of configuration order.
+Virtual nodes improve balance without guaranteeing identical shard sizes.
 
-| Membership | node1 | node2 | node3 | Ownership changed on addition |
-| --- | ---: | ---: | ---: | ---: |
-| 1 node | 10,000 | - | - | - |
-| 2 nodes | 5,110 | 4,890 | - | 48.90% |
-| 3 nodes | 3,202 | 3,457 | 3,341 | 33.41% |
+The current async engine uses Uvicorn, httptools and Linux uvloop. Upstream
+HTTP/1.1 connections are reused through bounded pools. Each node uses SQLite
+WAL/FULL synchronization, a dedicated writer and a bounded encoded-response
+cache with strict `data_version` coherence. Changed writes are acknowledged
+after commit. Identical cached, committed values can satisfy repeated writes
+without another database write. Timestamped operation logging remains enabled.
 
-Adding node3 moved ownership only to node3. This tests routing, not physical
-data movement.
+## 3. Functional and Routing Validation
 
-The seven API integration tests passed against the updated Docker cluster,
-including concurrent writes to one key and concurrent PUT/DELETE operations.
-The earlier 300-key placement check verified 78 keys on node1, 115 on node2,
-and 107 on node3, with every value correct and no unexpected copies.
+| Check | Evidence |
+| --- | --- |
+| API behavior and concurrency | Seven integration tests passed against the updated Docker cluster, including same-key writes and concurrent PUT/DELETE. |
+| Hash-ring behavior | Nine tests passed for deterministic routing, node ordering, additions/removals, invalid inputs and Unicode keys. |
+| Placement | The 300-key check returned all expected values with no unexpected copies. |
+| Persistence | GET-only verification after container recreation returned all 3,000 existing values with zero errors/mismatches. |
+| Current Linux node-count study | All 9,000 measured operations succeeded; SQLite contents and ownership were independently checked after every trial. |
 
-## Node-count experiment before the final async runtime
+Recorded placement of the default 300 benchmark keys:
 
-The latest local `benchmark_1_nodes.csv`, `benchmark_2_nodes.csv`, and
-`benchmark_3_nodes.csv` describe the intermediate threaded optimization stage,
-before the final async runtime was added. Windows clients used Docker
-Desktop/WSL2, three threads and 300 keys per phase. Each configuration had
-one warm-up and five measured trials; every trial wrote the keys before
-reading them. All measured requests succeeded. The three
-`benchmark_*_nodes_before_optimization.csv` files preserve the earlier baseline.
+| Node | Correct Keys | Share |
+| --- | ---: | ---: |
+| node1 | 78 | 26.00% |
+| node2 | 115 | 38.33% |
+| node3 | 107 | 35.67% |
 
-The local `benchmark_comparison.md` reports these five-trial medians:
+For a separate 10,000-key routing demonstration, the three-node shares were
+32.02%, 34.57% and 33.41%. Adding node3 changed ownership for 33.41% of keys,
+all moving to node3. This demonstrates ownership changes rather than physical
+record relocation.
 
-| Nodes | SET ops/s | GET ops/s | SET average (ms) | GET average (ms) | SET p99 (ms) | GET p99 (ms) |
+## 4. Measurement Methodology
+
+Two node-count studies are reported separately:
+
+| Setting | Intermediate Implementation | Current Async Implementation |
+| --- | --- | --- |
+| Environment | Windows client and Docker Desktop/WSL2 | Independent Linux validation workspace |
+| Deployment | Containerized router and storage nodes | Native processes using loopback HTTP |
+| Resources | Docker reported 8 CPUs and 7.529 GiB memory | Two-CPU quota and 8 GiB memory, shared by client and services |
+| Runtime | Intermediate threaded optimization | CPython 3.12.14; Uvicorn 0.52.1, httptools 0.9.0, uvloop 0.23.0 |
+| Workload | Three client threads, 300 keys per phase | Same bundled client, three threads, 300 keys per phase |
+| Repetitions | One warm-up plus five measured trials per node count | One warm-up plus five measured trials per node count |
+
+Each trial performs SET followed by GET/value verification. Current-runtime
+tests use fresh temporary databases for each node-count configuration, one
+router worker, 150 virtual nodes per store, SQLite FULL durability, strict
+coherence and enabled logging. Independent SQL checks verify values and
+placement after each trial. No laptop database or volume is used by the
+independent validation study.
+
+Tables report medians of per-trial throughput and latency measurements. A p99
+entry is the median of five per-trial p99 values, not a pooled percentile.
+Measured SET phases repeat the warm-up dataset; they do not represent
+fresh-insert capacity. The bundled `http.client` benchmark differs from the
+provided `requests.Session` example, so results are identified by client.
+
+## 5. Performance Results
+
+### 5.1 Intermediate Runtime: Windows/Docker Study
+
+These medians match the committed node-count CSVs and generated summary:
+
+| Nodes | SET ops/s | GET ops/s | SET Avg ms | GET Avg ms | SET p99 ms | GET p99 ms |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1 | 1,084.3 | 1,208.0 | 2.75 | 2.46 | 4.98 | 5.86 |
 | 2 | 976.0 | 1,226.7 | 3.06 | 2.43 | 10.18 | 5.76 |
 | 3 | 1,118.5 | 1,281.3 | 2.66 | 2.33 | 5.90 | 4.86 |
 
-![Intermediate optimization: throughput, 3 threads and 300 keys](throughput.png)
+![Intermediate threaded runtime: throughput](throughput.png)
 
-![Intermediate optimization: latency, 3 threads and 300 keys](latency.png)
+![Intermediate threaded runtime: average and per-trial p99 latency](latency.png)
 
-Each p99 entry is the median of five per-trial p99s, not a pooled percentile.
-From one to three nodes, SET throughput rose about 3.2% and GET throughput
-about 6.1%. SET throughput dipped at two nodes, whose SET p99 also increased.
-These short observations show modest, non-monotonic scaling rather than
-linear speedup or statistical significance. The graphs match this intermediate
-stage; they must not be labeled as a final async one-/two-/three-node comparison.
+These figures describe the intermediate runtime. From one to three nodes,
+SET throughput increased approximately 3.2% and GET approximately 6.1%, with
+a SET dip and higher SET tail latency at two nodes.
 
-## Optimized three-node observations
+### 5.2 Current Async Runtime: Controlled Linux Study
 
-Subsequent tests used the updated async implementation, one router worker,
-SQLite FULL durability, strict cache coherence and enabled operation logs.
-Windows used Python 3.11.6; containers used Python 3.12 on Alpine. Docker
-reported eight CPUs and 7.529 GiB of memory. These are separate observations
-from the historical node-count study.
+| Nodes | SET ops/s | GET ops/s | SET Avg ms | GET Avg ms | SET p99 ms | GET p99 ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 4,070.6 | 5,086.3 | 0.730 | 0.583 | 1.433 | 1.189 |
+| 2 | 4,890.2 | 5,160.0 | 0.607 | 0.575 | 1.338 | 1.089 |
+| 3 | 4,761.7 | 5,754.5 | 0.622 | 0.515 | 1.204 | 1.074 |
 
-### Client location: three threads and 3,000 keys
+From one to three nodes, median repeated-workload SET throughput increased
+17.0% and GET increased 13.1%. SET peaked at two nodes and then declined
+slightly at three, so the trend is not monotonic.
 
-| Client location | Phase | Successful | Throughput (ops/s) | Average (ms) | p99 (ms) |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Windows, published router port | SET | 3,000 | 899.9 | 3.32 | 7.17 |
-| Windows, published router port | GET | 3,000 | 1,878.6 | 1.59 | 5.08 |
-| Inside router container, later run | repeated SET | 3,000 | 3,266.6 | 0.91 | 2.10 |
-| Inside router container, later run | GET | 3,000 | 3,893.3 | 0.76 | 1.41 |
+The current-version study completed all 9,000 measured operations with zero
+errors and mismatches, plus 1,800 warm-up operations. Per-trial metrics are
+included in Appendix A. These Linux results are separate from the Windows
+figures above; their differences cannot be attributed solely to the runtime
+change because the environments differ.
 
-Every phase had zero errors and mismatches. The second SET reused values
-already committed by the first run, so the SET difference combines client
-location and write history. It cannot isolate networking overhead. These
-single runs cannot be compared causally with the older 300-key scaling study.
+### 5.3 Additional Current-Runtime Write Study
 
-### Fresh, changed and identical writes
+A separate Linux batch used three nodes, three client threads, 3,000 keys per
+phase and five measured trials after a warm-up. SQL state was independently
+verified. Fresh tables or changed committed values were prepared before SET,
+outside the timed phase, while strict coherence remained enabled.
 
-`bench_write_workloads.py` creates a unique UUID key namespace, verifies reads
-after each write workload, and removes its test keys. Each row below is one
-3,000-operation phase with a client inside the router container.
+| SET Workload | Median ops/s | Average ms | Per-Trial p99 ms |
+| --- | ---: | ---: | ---: |
+| Fresh inserts | 2,127.7 | 1.405 | 4.939 |
+| Changed values | 2,158.4 | 1.385 | 3.162 |
+| Identical repeated values | 4,412.5 | 0.675 | 1.440 |
 
-| Threads | Phase | Throughput (ops/s) | Average (ms) | p99 (ms) |
-| ---: | --- | ---: | ---: | ---: |
-| 3 | Fresh inserts | 1,035.4 | 2.89 | 9.10 |
-| 3 | Changed values | 1,459.5 | 2.05 | 4.61 |
-| 3 | Identical repeated values | 3,174.8 | 0.94 | 1.97 |
-| 16 | Fresh inserts | 2,627.9 | 6.06 | 14.91 |
-| 16 | Changed values | 2,665.8 | 5.98 | 13.55 |
-| 16 | Identical repeated values | 3,834.6 | 4.16 | 11.99 |
+This separates real insert/update work from identical-value optimizations.
+Higher repeated-write throughput should not be presented as fresh disk-write
+capacity. These rows are not part of the 300-key node-count comparison.
 
-All six phases in each run, including three GET verification phases, completed
-without errors or mismatches. Cleanup succeeded. Increased concurrency raised
-write throughput while increasing latency; it does not demonstrate better
-latency or an improvement under a fixed three-thread grading workload.
+### 5.4 Router Worker Selection
 
-### One versus two router processes
+In the laptop's separate-client Docker study, 20 GET runs per configuration
+used 16 threads and 3,000 keys. Both configurations verified 60,000 reads
+without errors or mismatches.
 
-A separate read-only client container made 20 runs per configuration using
-16 threads and 3,000 keys. Each configuration verified 60,000 reads with
-zero errors/mismatches.
-
-| Router workers | Median ops/s | Median average (ms) | Median per-run p99 (ms) |
+| Router Workers | Median ops/s | Median Average ms | Median Per-Run p99 ms |
 | ---: | ---: | ---: | ---: |
 | 1 | 4,645.0 | 3.43 | 10.97 |
 | 2 | 4,525.8 | 3.52 | 12.41 |
 
-Two workers did not demonstrate a benefit, so one remains the selected
-configuration. The sessions were not randomized or interleaved, and the
-small throughput difference may include timing variation. A CPU snapshot
-showed client 114.85%, router 89.32%, and each node about 25-27%; Docker CPU
-percentages can exceed 100% across threads. One snapshot does not prove a
-unique bottleneck. The optional worker configuration remains for experiments.
+Two workers did not demonstrate a benefit, so one remains the default. The
+sessions occurred at different times and were not randomized or interleaved.
 
-The final GET-only check after container recreation verified all 3,000
-existing values without SET: 3,328.6 ops/s, 0.89 ms average and 2.29 ms p99.
-This demonstrates persistence across the tested recreation, not host disk
-failure protection or warm-cache capacity.
+## 6. Analysis and Evaluation Limits
 
-## Membership changes and migration
+Both node-count studies show gains between one and three nodes under their
+respective conditions, with non-monotonic SET results. Neither demonstrates
+linear scaling. In the Linux study, the client and all services share a
+two-CPU quota, and the small warmed dataset fits within one node's cache.
+Client work, routing, logging, scheduling and storage compete for those resources.
 
-Consistent hashing changes ownership; it does not move records. The maintenance
-procedure requires pausing the router and all other writers before using the
-helpers to export current authoritative owners, copy a snapshot to destination
-owners, and verify the values. The operator then resumes with the target
-membership. The helpers target `kv-benchmark`, not `kv-cluster`.
+These are short, sequentially ordered experiments, with five measured trials
+per configuration and no confidence intervals. The individual causes of the
+observed differences were not isolated. Larger datasets, longer trials,
+randomized configuration order and independent server resources would provide
+stronger evidence. No measurements from the professor's server or an official
+leaderboard benchmark are claimed.
 
-The demonstrated one-to-three migration used a 300-value snapshot, copied
-78/115/107 values to node1/node2/node3, and passed a subsequent GET-only check.
-This was a controlled migration. The included importer upserts and retains old
-rows rather than reconciling each target to a complete snapshot. Reused volumes
-can therefore retain stale or deleted values. Old copies are not replicas.
-Full destination reconciliation and backup/rollback automation remain future
-work. Traffic must stay paused during migration; per-node commits are not a
-cluster-wide atomic transaction.
+## 7. Membership Changes and Data Migration
 
-## Challenges and evaluation limits
+Consistent hashing computes new ownership without moving stored values. The
+maintenance procedure pauses the router and all other writers, exports a fresh
+snapshot from current authoritative owners, starts destination nodes, imports
+and verifies the values, and resumes with the target membership. The included
+helpers target `kv-benchmark`.
 
-HTTP framing and connection reuse addressed early dropped-response failures.
-Asynchronous I/O, persistent upstream pools, cached encoded responses and
-grouped commits reduce overhead while retaining durability. Response-cache
-publication follows commit; strict coherence detects outside SQLite writes.
+A controlled one-to-three-node migration used a 300-value snapshot. It copied
+78/115/107 values to the three owners and passed a subsequent GET-only check
+with zero errors and mismatches.
 
-The current API tests and helper measurements support correctness under their
-tested conditions. The final async version has not yet been measured across
-one, two and three nodes under identical conditions on this laptop. Repeating
-that experiment, with preserved raw results and consistent cache/write history,
-is needed to establish its own scaling curve. The repository client also
-differs from the instructor's `requests.Session` example. No official grading
-benchmark or leaderboard score was measured.
+The current importer upserts values while retaining existing destination rows.
+It therefore does not reconcile a complete snapshot: stale or previously
+deleted values may survive in reused destinations. An isolated audit confirmed
+that importing an empty partition retained a pre-existing row. Complete-state
+reconciliation with recoverable backups is required before claiming general
+migration correctness for reused volumes.
 
-Membership is configured at startup. There is no replication, automatic
-storage-node failover, online migration, authentication, or TLS. The router
-is a single point of failure. Future work includes full-state migration,
-replication, security, and longer controlled studies varying value size,
-concurrency and node count. Startup and reproduction commands are in
-[README](../README.md).
+Migration requires downtime and is not atomic across nodes. Old copies are
+not replicas. The controlled demonstration establishes a limited maintenance
+case, not online reconfiguration or automatic failure recovery.
+
+## 8. Challenges and Resolutions
+
+| Challenge | Resolution or Remaining Work |
+| --- | --- |
+| Dropped or incomplete HTTP responses | Explicit framing and persistent connection handling resolved the observed failures. |
+| Competing mutations and durable acknowledgments | A dedicated writer orders mutations; cache publication follows commit. |
+| Request and logging overhead | Async HTTP, bounded persistent pools, encoded-response caching and background logging reduce overhead. |
+| Docker image/port conflicts and missing build inputs | Consistent image tags, separate deployment configurations and tracking every COPY input made builds reproducible. |
+| Misleading performance comparisons | Workload, client, environment, cache/write history and implementation stage are identified separately. |
+| Data relocation after ownership changes | Snapshot migration supports a controlled case; complete destination reconciliation remains unfinished. |
+
+## 9. Conclusion and Future Work
+
+The system implements persistent sharded storage, deterministic routing,
+containerized deployment and measured one-/two-/three-node operation. Tests
+verified concurrent API behavior, key placement and persistence. Current-runtime
+Linux measurements demonstrate modest scaling within the tested resource budget.
+
+Future priorities are complete-state migration, replication and automatic
+recovery, authentication/TLS, and broader workload studies. Fixed membership,
+the router's single point of failure and missing storage replication limit
+availability guarantees.
+
+## Appendix A: Current-Runtime Per-Trial Results
+
+All rows use three client threads, 300 keys per phase and one router worker.
+Values are rounded for readability; Section 5.2 medians use the unrounded
+measurements. The benchmark's successful-request latency statistics are used.
+
+<details>
+<summary>Expand the Linux validation trial metrics</summary>
+
+```csv
+nodes,trial,phase,successful,errors,mismatches,throughput_ops_s,average_ms,p99_ms
+1,1,set,300,0,0,3891.078341,0.762650,2.529876
+1,1,get,300,0,0,6116.749293,0.482426,0.802308
+1,2,set,300,0,0,3533.646403,0.837258,1.644024
+1,2,get,300,0,0,3818.824526,0.777305,4.050808
+1,3,set,300,0,0,4820.378400,0.614742,1.419042
+1,3,get,300,0,0,5086.344944,0.583422,1.188920
+1,4,set,300,0,0,4298.502638,0.690209,1.157774
+1,4,get,300,0,0,5394.222841,0.549439,1.011657
+1,5,set,300,0,0,4070.574481,0.730479,1.433283
+1,5,get,300,0,0,4827.093511,0.613529,1.796220
+2,1,set,300,0,0,4170.372448,0.712866,1.379873
+2,1,get,300,0,0,5710.863547,0.517768,1.088672
+2,2,set,300,0,0,5256.091771,0.565063,1.471289
+2,2,get,300,0,0,4591.530555,0.645842,1.499670
+2,3,set,300,0,0,4543.903078,0.652801,1.109192
+2,3,get,300,0,0,5159.951265,0.574851,0.982475
+2,4,set,300,0,0,4890.233254,0.603985,1.338061
+2,4,get,300,0,0,4412.296063,0.673708,1.356569
+2,5,set,300,0,0,4896.783956,0.607106,1.171254
+2,5,get,300,0,0,5679.456044,0.521674,0.960122
+3,1,set,300,0,0,4424.674670,0.670902,1.192343
+3,1,get,300,0,0,6011.845861,0.490948,0.849463
+3,2,set,300,0,0,5693.538460,0.520884,0.886584
+3,2,get,300,0,0,7060.492132,0.418786,0.878754
+3,3,set,300,0,0,4761.656929,0.622395,1.405212
+3,3,get,300,0,0,4522.603134,0.654106,1.073547
+3,4,set,300,0,0,4923.223802,0.602321,1.287027
+3,4,get,300,0,0,5754.488655,0.514686,3.759727
+3,5,set,300,0,0,4688.842401,0.632958,1.204030
+3,5,get,300,0,0,5721.956842,0.518117,1.288539
+```
+
+</details>
+
+Run instructions: [Project README](../README.md). Historical CSVs, their
+pre-optimization baselines, summaries and figures remain in this report folder.
