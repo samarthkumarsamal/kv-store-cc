@@ -1,7 +1,6 @@
-# Assignment 1: Persistent Single-Server Key-Value Store
+# Persistent Single-Server Key-Value Store (Cloud Computing)
 
-**Student:** Samarth Kumar Samal  
-**Course:** CSCI 5144: Cloud Computing
+**Student:** Samarth Kumar Samal
 
 ## Design and justification
 
