@@ -1,0 +1,5 @@
+services:
+  router:
+    environment:
+      KV_ENGINE: "async"
+      KV_ROUTER_WORKERS: "2"

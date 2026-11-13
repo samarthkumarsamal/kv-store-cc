@@ -1,0 +1,43 @@
+name: kv-benchmark
+
+services:
+  node1:
+    image: kv-store:1.0
+    init: true
+    volumes:
+      - node1-data:/data
+
+  node2:
+    image: kv-store:1.0
+    init: true
+    profiles: ["two", "three"]
+    volumes:
+      - node2-data:/data
+
+  node3:
+    image: kv-store:1.0
+    init: true
+    profiles: ["three"]
+    volumes:
+      - node3-data:/data
+
+  router:
+    image: kv-router:1.0
+    init: true
+    ports:
+      - "127.0.0.1:8080:8080"
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--node"
+      - "node1=node1:8080"
+    depends_on:
+      node1:
+        condition: service_healthy
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

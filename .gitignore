@@ -1,0 +1,31 @@
+# Python environments
+venv/
+.venv/
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local database files
+data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Migration snapshots
+backups/
+
+# Environment variables
+.env
+.env.*
+
+# Logs
+*.log
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

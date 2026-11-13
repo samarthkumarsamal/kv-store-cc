@@ -1,0 +1,5 @@
+uvicorn==0.52.1
+httptools==0.9.0
+uvloop==0.23.0; sys_platform != "win32" and platform_python_implementation == "CPython"
+click==8.4.2
+h11==0.16.0

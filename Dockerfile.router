@@ -1,0 +1,26 @@
+FROM python:3.12-alpine
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN addgroup -S kvgroup \
+    && adduser -S kvuser -G kvgroup
+
+COPY requirements-fast.txt ./
+
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -f /run/secrets/proxy_ca ]; then export PIP_CERT=/run/secrets/proxy_ca; fi; \
+    pip install --no-cache-dir --only-binary=:all: -r requirements-fast.txt
+
+COPY --chown=kvuser:kvgroup router.py consistent_hash.py runtime_logging.py storage.py access_logging.py fast_runtime.py fast_http.py ./
+
+USER kvuser
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=5s --timeout=3s --start-period=3s --retries=6 \
+    CMD python -c "import http.client; c=http.client.HTTPConnection('127.0.0.1',8080,timeout=2); c.request('GET','/__health_probe__'); r=c.getresponse(); r.read(); c.close(); raise SystemExit(0 if r.status in (200,404) else 1)"
+
+ENTRYPOINT ["python", "router.py"]

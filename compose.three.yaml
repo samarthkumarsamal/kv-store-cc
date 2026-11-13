@@ -1,0 +1,20 @@
+services:
+  router:
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--node"
+      - "node1=node1:8080"
+      - "--node"
+      - "node2=node2:8080"
+      - "--node"
+      - "node3=node3:8080"
+    depends_on:
+      node1:
+        condition: service_healthy
+      node2:
+        condition: service_healthy
+      node3:
+        condition: service_healthy
