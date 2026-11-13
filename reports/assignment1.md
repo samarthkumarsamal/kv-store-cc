@@ -1,58 +1,56 @@
-# Persistent Single-Server Key-Value Store (Cloud Computing)
+# Assignment 1: Persistent Single-Server Key-Value Store
 
-**Student:** Samarth Kumar Samal
+**Author:** Samarth Kumar Samal  
+**Course:** CSCI 5144: Cloud Computing
 
-## Design and justification
+## 1. Design Decisions and Justification
 
-The server implements GET, PUT, and DEL as HTTP GET, PUT, and DELETE. POST is
-also accepted for the assignment's write/read benchmark. Writes contain
-`{"value": ...}`; successful reads return that structure. The default address
-is `http://127.0.0.1:8080`. Python provides readable application code, JSON,
-SQLite, and a standard-library fallback.
+The application provides a standalone HTTP API for GET, PUT and DEL, implemented
+as GET, PUT and DELETE. POST also stores values for compatibility with the
+reference benchmark. Writes accept `{"value": ...}` and successful reads return
+the same structure. The default endpoint is `http://127.0.0.1:8080`.
 
-The optimized engine requires Python 3.11+ with the pinned packages in
-`requirements-fast.txt`. Uvicorn/httptools handle HTTP and uvloop handles Linux
-I/O; Windows uses asyncio. Persistent HTTP/1.1 connections avoid repeated
-connection setup. `--engine threaded` retains the original threaded engine.
+Python was selected for readable application code and its JSON, threading and
+SQLite libraries. The optimized engine uses Python 3.11+, Uvicorn/httptools and
+Linux uvloop; Windows uses asyncio. Dependencies are pinned in
+`requirements-fast.txt`. A standard-library threaded fallback remains available.
 
-SQLite uses WAL and `synchronous=FULL`. A dedicated writer serializes queued
-mutations, grouping up to 64 already-queued operations into a transaction
-without an added delay. Success follows commit. Concurrent operations on one
-key have an execution order; no fixed winner is promised. Parameterized SQL
-separates data from statements.
+SQLite WAL and `synchronous=FULL` provide local persistence. A dedicated writer
+orders mutations and groups up to 64 already-queued operations per transaction
+without adding a batching delay. Changed writes succeed after commit. Concurrent
+same-key requests have an execution order; the final writer is not predetermined.
 
-A bounded LRU cache holds immutable encoded read responses, avoiding repeated
-JSON conversion. Strict coherence detects external SQLite commits through
-`data_version`. An identical cached, committed value can satisfy a repeated
-PUT without another disk write; this optimization is not fresh-write throughput.
+A bounded cache stores immutable encoded read responses. Strict coherence checks
+SQLite `data_version` for external commits. Identical cached, committed values
+can satisfy repeated writes without another disk write.
 
-## Errors, logging and validation
+## 2. Error Handling, Logging and Validation
 
-Invalid input returns 400, missing keys return 404, and storage failures return
-500. Write bodies require JSON with a `value` field, valid framing, and at most
-1 MiB. Keys must be non-empty and at most 1,024 UTF-8 bytes. Non-finite JSON
-values are rejected. Timestamped operation logs include methods, paths and
-status codes, excluding stored values. Bounded background queues reduce logging
-work in request handlers and flush during normal shutdown.
+Invalid input returns 400, missing keys 404, and storage failures 500. Write
+bodies require valid JSON containing `value`, a JSON content type, and valid
+framing. Bodies are limited to 1 MiB; keys to 1,024 UTF-8 bytes. Parameterized
+SQL handles keys and values. Timestamped logs record methods, paths and status
+codes, excluding stored values. Bounded background queues flush on normal shutdown.
 
-The storage smoke test passed CRUD and reopen-persistence checks using a
-temporary database. The seven API tests cover CRUD, missing keys, JSON types,
-invalid requests, independent concurrency, same-key writes, and concurrent
-writes/deletes. They passed against the updated standalone async and threaded
-engines in a separate Linux validation workspace, and against the updated
-Docker cluster on the laptop. Container benchmarks and the 3,000-key GET-only
-persistence check are reported in Assignments 2 and 3.
+The storage smoke test passed create, read, update, delete and reopen-persistence
+checks. Seven API tests cover CRUD, missing keys, JSON types, invalid requests,
+independent concurrency, same-key writes and concurrent PUT/DELETE. These passed
+against standalone async and threaded engines in Linux validation and against
+the containerized cluster on the laptop. Persistence and performance evidence
+for the containerized system appear in Reports 2 and 3.
 
-## Challenges, assumptions and improvements
+## 3. Challenges and Resolutions
 
-Early connection closures caused incomplete HTTP responses. Correct framing
-and persistent connections resolved the observed errors. Cache publication
-must follow commit; failed writes must not publish uncommitted values. Each
-storage process owns its database, and strict coherence is the default.
+Early connection closures caused incomplete responses. Explicit response framing
+and persistent HTTP connections resolved the observed failures. Queued mutations
+and post-commit cache publication address competing writes and prevent successful
+responses from exposing uncommitted updates.
 
-The application assumes trusted clients and local persistent storage. There
-is no authentication, TLS, replication, or protection against disk loss.
-Abrupt termination can lose queued log records. Future work includes access
-control, replication, log retention, and larger repeated workload studies.
+## 4. Assumptions and Future Improvements
 
-Run instructions are in [README](../README.md).
+The service assumes trusted clients and local storage, with one process owning
+each node's database. Authentication, TLS and replication remain future work.
+Abrupt termination can lose queued log records; local durability does not protect
+against disk loss. Further work includes log retention and longer workload studies.
+
+Execution and API examples: [Project README](../README.md).
